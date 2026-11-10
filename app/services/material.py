@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from ..config import get_settings
 from ..context import gather, submit
 from ..errors import LLMError, LLMTimeout, unreadable, validation_error
-from ..grounding import covered_by, numbers_unsupported, mentions_term, normalize, quote_in_any, term_aliases
+from ..grounding import covered_by, numbers_unsupported, mentions_term, normalize, pair_parts, quote_in_any, term_aliases
 from ..llm.base import ImageInput
 from ..llm.router import Outcome, OutputRejected, Task, call_structured
 from ..logging_setup import log_event
@@ -462,6 +462,10 @@ def _find_relations(ctx: MaterialContext, terms: list[TermBrief]) -> list[tuple[
         return []
     chunks = sorted(pool.values(), key=lambda c: (c.page, c.id))
     names = {normalize(t.name): t.name for t in terms}
+
+    def _named_in(key: str, body: str) -> bool:
+        # 짝 개념('전역 최솟값·지역 최솟값')은 한쪽 이름만 나와도 된다
+        return key in body or any(normalize(p) in body for p in pair_parts(names[key]))
     max_rel = len(terms) * 2
     verify_cache: dict[str, str | None] = {}
 
@@ -476,7 +480,7 @@ def _find_relations(ctx: MaterialContext, terms: list[TermBrief]) -> list[tuple[
                 continue
             pair = frozenset((a, b))
             body = normalize(r.text)
-            if pair in pairs or not r.text.strip() or a not in body or b not in body:
+            if pair in pairs or not r.text.strip() or not _named_in(a, body) or not _named_in(b, body):
                 continue   # 같은 쌍 반복, 또는 문장에 두 용어가 다 들어 있지 않은 것(관계가 아니라 한 용어 설명)은 뺀다
             ids = [x for x in r.chunk_ids if x in pool]
             if not ids or not quote_in_any(r.evidence_quote, [pool[x].text for x in ids]):
