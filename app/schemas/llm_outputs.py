@@ -125,8 +125,20 @@ class NoteSection(BaseModel):
     lines: list[NoteLine]
 
 
+class NoteAnswer(BaseModel):
+    message_ref: int         # 선생님 답변 메시지 번호 (질문과 답 목록의 '답변 #')
+    lines: list[NoteLine]
+
+
+class NoteWonder(BaseModel):
+    index: int               # '아직 궁금한 점' 목록 번호
+    text: str
+
+
 class NoteOutput(BaseModel):
-    sections: list[NoteSection]
+    concept_sections: list[NoteSection]   # 개념 설명 (선생님 설명 메시지)
+    answers: list[NoteAnswer]             # 질문과 답 (선생님 답변 메시지)
+    wonders: list[NoteWonder]             # 아직 궁금한 사항 (손 들었지만 선생님이 받지 않은 것)
 
 
 class LLMSolveAnswer(BaseModel):

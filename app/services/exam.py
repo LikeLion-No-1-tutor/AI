@@ -28,7 +28,8 @@ from ..prompts import render
 from ..schemas.api import ExamTerm, GeneratedQuestion, GenerateRequest, SolveAnswer, SolveRequest
 from ..schemas.enums import ExamKind, QuestionType
 from ..schemas.llm_outputs import AnswerVerificationOutput, ExamGenerationOutput, ExamSolveOutput, LLMQuestion
-from .common import UNKNOWN_RESPONSE, claim_verification_on, index_messages, rules, student_system, verify_claims
+from .common import (UNKNOWN_RESPONSE, claim_verification_on, index_messages, rules, student_system,
+                     teacher_context, verify_claims)
 from .summary_doc import ParsedSummary, parse_summary
 
 MAX_ROUNDS = 3
@@ -244,7 +245,7 @@ def solve_exam(req: SolveRequest) -> list[SolveAnswer]:
         return [SolveAnswer(number=n, response=UNKNOWN_RESPONSE) for n in numbers]
     qmap = {q.number: q for q in req.questions}
 
-    context = "[선생님 메시지]\n" + "\n".join(f"[메시지 {k}] {v}" for k, v in indexed.teacher.items())
+    context = teacher_context(indexed)   # 답변에는 어느 질문에 대한 답인지 붙여서 검사 AI에 보여 준다
     verify_cache: dict[str, str | None] = {}
 
     def validate(out: ExamSolveOutput) -> Outcome[dict[int, str]]:
@@ -303,7 +304,7 @@ def solve_exam(req: SolveRequest) -> list[SolveAnswer]:
     for q in req.questions:
         choices = "".join(f"\n  [{i}] {c}" for i, c in enumerate(q.choices or []))
         blocks.append(f"{q.number}번 ({q.question_type.value}) {q.content}{choices}")
-    system = student_system(req.persona, render("exam_solve"))
+    system = student_system(req.persona, render("exam_solve"), voice="시험")
     user = f"[수업 대화]\n{indexed.format(req.persona.name)}\n\n[시험 문제]\n" + "\n".join(blocks)
     answers = call_structured(Task.EXAM_SOLVE, system=system, user=user, output_model=ExamSolveOutput,
                               validate=validate).value

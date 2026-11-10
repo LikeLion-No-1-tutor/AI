@@ -218,8 +218,8 @@ def materials_summary(title: str = Form(...), terms: str = Form(...), file: Uplo
 @app.post("/lessons/messages/analyze", response_model=AnalyzeResponse, dependencies=auth)
 def lessons_analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     usage = _realtime()
-    updates, hand = lesson.analyze(req)
-    return AnalyzeResponse(term_updates=updates, hand_raise=hand, usage=usage.items())
+    updates, hand, reaction = lesson.analyze(req)
+    return AnalyzeResponse(term_updates=updates, hand_raise=hand, reaction=reaction, usage=usage.items())
 
 
 @app.post("/lessons/questions", response_model=QuestionResponse, dependencies=auth)

@@ -133,6 +133,8 @@ class HandRaise(BaseModel):
 class AnalyzeResponse(BaseModel):
     term_updates: list[TermUpdate]
     hand_raise: HandRaise | None
+    # 학생 반응: 선생님이 질문에 답했고 학생이 다시 손 들지 않았을 때만, 페르소나별 고정 문장 (LLM 호출 없음)
+    reaction: str | None = None
     usage: list[Usage]
 
 
@@ -157,6 +159,8 @@ class NoteRequest(BaseModel):
     title: Name
     persona: Persona
     messages: list[Message] = Field(max_length=MAX_MESSAGES)
+    # 손 들었지만 선생님이 끝까지 누르지 않은 이유 (AI-3의 raised_reasons와 같은 값) → '아직 궁금한 사항'
+    raised_reasons: list[Text] = Field(default_factory=list, max_length=MAX_MESSAGES)
 
 
 class NoteResponse(BaseModel):

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from ..config import get_settings
 from ..errors import LLMError, LLMTimeout
 from ..llm.router import Outcome, OutputRejected, Task, call_structured
+from ..personas import voice_block
 from ..logging_setup import log_event
 from ..prompts import render
 from ..rag.chunker import Chunk
@@ -22,9 +23,17 @@ def rules() -> str:
     return render("grounding_rules")
 
 
-def student_system(persona: Persona, task_prompt: str) -> str:
-    """학생 AI 시스템 프롬프트 = Django의 persona.system_prompt + 학생 공통 규칙 + 이번 작업."""
-    return f"{persona.system_prompt.strip()}\n\n{render('student_rules')}\n\n{task_prompt}"
+def student_system(persona: Persona, task_prompt: str, voice: str | None = None) -> str:
+    """학생 AI 시스템 프롬프트 = Django의 persona.system_prompt + 학생 공통 규칙 + 이번 작업 (+ 글투).
+
+    voice: 질문 / 노트 / 시험 — 이 페르소나의 글투(app/personas/voices.json)를 작업 뒤에 붙인다.
+    손 들기 메모처럼 화면에 안 보이는 출력은 None (토큰 절약).
+    """
+    parts = [persona.system_prompt.strip(), render("student_rules"), task_prompt]
+    block = voice_block(persona.code, persona.name, voice) if voice else ""
+    if block:
+        parts.append(block)
+    return "\n\n".join(parts)
 
 
 def format_chunks(chunks: Iterable[Chunk]) -> str:
@@ -61,6 +70,29 @@ def index_messages(messages: list[Message]) -> IndexedMessages:
     teacher = {k: m.content for k, m in items if m.sender == Sender.TEACHER and m.content.strip()}
     questions = [m.content for _, m in items if m.kind == MessageKind.QUESTION]
     return IndexedMessages(items=items, teacher=teacher, student_questions=questions)
+
+
+def teacher_context(indexed: IndexedMessages) -> str:
+    """본문 검사(AI-5·AI-7)에 넘기는 선생님 메시지. 답변에는 어느 학생 질문에 대한 답인지 붙인다.
+
+    질문 없이 답만 보여 주면 검사 AI가 "꼭 그렇진 않아" 같은 답을 앞의 다른 설명에 대한 반박으로
+    잘못 읽고, 맞게 쓴 줄을 떨어뜨린다 (실측). 질문은 reply_to_id로, 없으면 바로 앞의 학생 질문으로 찾는다.
+    """
+    ref_by_id = {m.id: k for k, m in indexed.items if m.id is not None}
+    by_ref = {k: m for k, m in indexed.items}
+    lines, last_q = [], ""
+    for k, m in indexed.items:
+        if m.kind == MessageKind.QUESTION:
+            last_q = m.content.strip()
+        if k not in indexed.teacher:
+            continue
+        prefix = ""
+        if m.kind == MessageKind.ANSWER:
+            target = by_ref.get(ref_by_id.get(m.reply_to_id)) if m.reply_to_id is not None else None
+            q = target.content.strip() if target is not None and target.kind == MessageKind.QUESTION else last_q
+            prefix = f"(학생 질문 \"{q}\"에 대한 답) " if q else ""
+        lines.append(f"[메시지 {k}] {prefix}{indexed.teacher[k]}")
+    return "[선생님 메시지]\n" + "\n".join(lines)
 
 
 # ───────────────────────── 본문 검사 (LLM) ─────────────────────────
