@@ -232,8 +232,8 @@ def lessons_questions(req: QuestionRequest) -> QuestionResponse:
 @app.post("/lessons/note", response_model=NoteResponse, dependencies=auth)
 def lessons_note(req: NoteRequest) -> NoteResponse:
     usage = _background()
-    content = note.write_note(req)
-    return NoteResponse(content=content, usage=usage.items())
+    content, terms = note.write_note(req)
+    return NoteResponse(content=content, terms=terms, usage=usage.items())
 
 
 # ───────────────────────── AI-6, AI-7, AI-8 시험 ─────────────────────────

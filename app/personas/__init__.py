@@ -50,7 +50,7 @@ def voice_block(persona_code: str, name: str, part: str) -> str:
     parts = [part] + (["궁금"] if part == "노트" else [])
     for p in parts:
         if v.get(p):
-            label = "아직 궁금한 사항" if p == "궁금" else p
+            label = "확인하지 않은 질문" if p == "궁금" else p
             lines.append(f"[{label}]")
             lines += [f"- {x}" for x in v[p]]
     lines.append("- 글투는 말하는 방식만 바꾼다. 선생님이 말하지 않은 사실·용어·숫자는 글투를 핑계로 보태지 않는다.")

@@ -4,7 +4,7 @@ ID는 Django DB의 ID를 그대로 받고, 결과에도 그대로 돌려준다.
 """
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, Field, model_validator
 
@@ -200,16 +200,38 @@ class QuestionResponse(BaseModel):
 # ───────────────────────── AI-5 정리노트 ─────────────────────────
 
 
+class NoteTerm(BaseModel):
+    """정리노트를 나눌 용어 (체크리스트 순서대로)."""
+    term_id: int
+    name: Name
+
+
 class NoteRequest(BaseModel):
     title: Name
     persona: Persona
     messages: Messages
-    # 손 들었지만 선생님이 끝까지 누르지 않은 이유 (AI-3의 raised_reasons와 같은 값) → '아직 궁금한 사항'
+    # 체크리스트 용어. 노트는 이 용어마다 '개념 · 학생 AI의 질문 · 확인하지 않은 질문'으로 나뉜다 (프론트 화면 기준)
+    terms: list[NoteTerm] = Field(default_factory=list, max_length=MAX_TERMS)
+    # 손 들었지만 선생님이 끝까지 누르지 않은 이유 (AI-3의 raised_reasons와 같은 값) → '확인하지 않은 질문'
     raised_reasons: list[Text] = Field(default_factory=list, max_length=MAX_MESSAGES)
 
 
+class NoteQuestion(BaseModel):
+    status: Literal["answered", "unseen"]   # answered: 학생 AI의 질문 + 나의 답변 / unseen: 확인하지 않은 질문
+    question: str
+    answer: str | None                      # 선생님(사용자)이 한 답 원문. unseen이면 null
+
+
+class NoteTermSection(BaseModel):
+    term_id: int | None                     # null = 어느 용어에도 맞지 않는 내용 ('그 밖에 배운 내용')
+    name: str
+    concept: str                            # 개념 (줄마다 줄바꿈). 정리한 설명이 없으면 "이 용어로 따로 정리한 내용은 없어요."
+    questions: list[NoteQuestion]
+
+
 class NoteResponse(BaseModel):
-    content: str
+    content: str                            # 같은 내용의 Markdown (저장·내보내기용)
+    terms: list[NoteTermSection]            # 화면용 구조 (프론트 정리노트 페이지와 같은 모양)
     usage: list[Usage]
 
 
