@@ -33,9 +33,11 @@ AI_SERVER_TOKEN=...           # Django와 같은 값 (X-Internal-Token). local�
 ```bash
 pip install -r requirements.txt
 python scripts/check_llm.py # 키와 모델이 연결되는지 확인
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
+uvicorn app.main:app --host 0.0.0.0 --port 8001 --no-access-log
 ```
 
+- 포트 `8001`: 로컬에서 Django가 8000번을 쓰므로 AI 서버는 8001번으로 켭니다. Django `.env`의 `AI_SERVER_URL=http://127.0.0.1:8001`과 맞춘 값입니다.
+- Django `.env`의 `AI_SERVER_TOKEN`은 이 서버 `.env`의 `AI_SERVER_TOKEN`과 **같은 값**이어야 합니다. Django는 토큰이 비어 있으면 AI 서버를 부르지 않고 `AI_SERVER_NOT_CONFIGURED` 에러를 냅니다.
 - `--no-access-log`: 요청 로그는 서버가 직접 `http_request` 이벤트(JSON)로 남깁니다.
 - Render 같은 배포 서버에서는 포트를 `--port $PORT`로 바꿉니다 (Docker 없이 배포).
 - API 문서: `/docs` (`APP_ENV=prod`에서는 꺼짐. 배포 서버에서 Swagger로 시험하려면 그 서버를 `APP_ENV=staging`으로 띄우세요. staging도 `AI_SERVER_TOKEN`이 필수라 Swagger의 `X-Internal-Token` 칸에 토큰을 넣어야 합니다)

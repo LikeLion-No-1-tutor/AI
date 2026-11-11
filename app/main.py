@@ -1,6 +1,6 @@
 """티칭로그 AI 서버 (FastAPI). Django만 부른다. DB를 쓰지 않는다.
 
-실행: uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
+실행: uvicorn app.main:app --host 0.0.0.0 --port 8001 --no-access-log
 문서: /docs
 
 | ID   | Method | 주소                          | 예산(LLM) |
