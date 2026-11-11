@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AfterValidator, BaseModel, Field, model_validator
 
 from .enums import ExamKind, MessageKind, QuestionType, Sender, TermStatus
 
@@ -64,6 +64,37 @@ class Message(BaseModel):
         return self
 
 
+def link_answers(messages: list[Message]) -> list[Message]:
+    """질문받기로 나온 학생 질문 뒤의 첫 선생님 메시지는 그 질문의 답변으로 본다 (팀 결정 2026-11-11).
+
+    Django는 프론트가 reply_to_id를 보낼 때만 kind=answer로 저장한다. 프론트가 빠뜨리면 답을 했어도
+    '설명'이 되어 정리노트의 질문과 답이 비고 학생 반응도 안 나오므로, 여기서 한 번에 바로잡는다.
+    - 답을 기다리는 질문이 있으면 다음 선생님 설명을 answer로 바꾸고 reply_to_id를 그 질문으로 단다.
+    - 기다리는 질문이 여럿이면 가장 최근 질문부터 (정리노트 짝 짓기와 같은 순서).
+    - 이미 answer인 메시지는 그대로 두고, 그 메시지가 답한 질문만 기다리는 목록에서 뺀다.
+    """
+    pending: list[Message] = []
+    out: list[Message] = []
+    for m in messages:
+        if m.sender == Sender.STUDENT:
+            if m.kind == MessageKind.QUESTION:
+                pending.append(m)
+        elif m.kind == MessageKind.ANSWER:
+            target = next((q for q in pending if m.reply_to_id is not None and q.id == m.reply_to_id), None)
+            if target is None and pending and m.reply_to_id is None:
+                target = pending[-1]
+            if target is not None:
+                pending.remove(target)
+        elif pending and m.content.strip():
+            q = pending.pop()
+            m = m.model_copy(update={"kind": MessageKind.ANSWER, "reply_to_id": q.id})
+        out.append(m)
+    return out
+
+
+Messages = Annotated[list[Message], Field(max_length=MAX_MESSAGES), AfterValidator(link_answers)]
+
+
 class TermBrief(BaseModel):
     """AI-1 응답, AI-2 요청의 용어 (아직 DB ID 없음)."""
     name: Name
@@ -112,13 +143,27 @@ class JudgePart(BaseModel):
 
 class StudentPart(BaseModel):
     persona: Persona
-    messages: list[Message] = Field(max_length=MAX_MESSAGES)
+    messages: Messages
     raised_reasons: list[Text] = Field(default_factory=list, max_length=MAX_MESSAGES)
 
 
 class AnalyzeRequest(BaseModel):
     judge: JudgePart
     student: StudentPart
+
+    @model_validator(mode="after")
+    def _judge_follows_link(self) -> "AnalyzeRequest":
+        """대화 끝의 방금 메시지가 link_answers로 답변이 됐으면, 용어 판정 쪽도 답변으로 맞춘다."""
+        msgs = self.student.messages
+        last = msgs[-1] if msgs else None
+        if (self.judge.message.kind == MessageKind.EXPLANATION and last is not None
+                and last.sender == Sender.TEACHER and last.kind == MessageKind.ANSWER
+                and last.content.strip() == self.judge.message.content.strip()):
+            question = next((m for m in msgs if m.id is not None and m.id == last.reply_to_id), None)
+            self.judge.message.kind = MessageKind.ANSWER
+            if question is not None and not self.judge.reply_to_question:
+                self.judge.reply_to_question = question.content
+        return self
 
 
 class TermUpdate(BaseModel):
@@ -143,7 +188,7 @@ class AnalyzeResponse(BaseModel):
 
 class QuestionRequest(BaseModel):
     persona: Persona
-    messages: list[Message] = Field(max_length=MAX_MESSAGES)
+    messages: Messages
     reason: Text
 
 
@@ -158,7 +203,7 @@ class QuestionResponse(BaseModel):
 class NoteRequest(BaseModel):
     title: Name
     persona: Persona
-    messages: list[Message] = Field(max_length=MAX_MESSAGES)
+    messages: Messages
     # 손 들었지만 선생님이 끝까지 누르지 않은 이유 (AI-3의 raised_reasons와 같은 값) → '아직 궁금한 사항'
     raised_reasons: list[Text] = Field(default_factory=list, max_length=MAX_MESSAGES)
 
@@ -213,7 +258,7 @@ class SolveQuestion(BaseModel):
 
 class SolveRequest(BaseModel):
     persona: Persona
-    messages: list[Message] = Field(max_length=MAX_MESSAGES)
+    messages: Messages
     questions: list[SolveQuestion] = Field(min_length=1, max_length=MAX_QUESTIONS)
 
 
@@ -281,7 +326,7 @@ class ReportExam(BaseModel):
 class ReportRequest(BaseModel):
     title: Name
     persona: PersonaBrief
-    messages: list[Message] = Field(max_length=MAX_MESSAGES)
+    messages: Messages
     terms: list[ReportTerm] = Field(max_length=MAX_TERMS)
     exam: ReportExam
 
