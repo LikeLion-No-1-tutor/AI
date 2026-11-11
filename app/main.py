@@ -168,7 +168,7 @@ def _background() -> context.UsageCollector:
 # ───────────────────────── AI-0 ─────────────────────────
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])  # UptimeRobot 같은 감시 서비스는 HEAD로 부른다
 def health() -> dict:
     return {"status": "ok"}
 
