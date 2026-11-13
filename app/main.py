@@ -150,7 +150,8 @@ def require_token(x_internal_token: str | None = Header(default=None)) -> None:
         if get_settings().app_env == "local":
             return  # 로컬 개발: 토큰 미설정이면 생략
         raise invalid_token()
-    if not x_internal_token or not hmac.compare_digest(x_internal_token, expected):
+    # 바이트로 비교: 문자열끼리 비교하면 한글이 섞인 토큰에서 TypeError가 나서 401 대신 502가 나간다
+    if not x_internal_token or not hmac.compare_digest(x_internal_token.encode(), expected.encode()):
         raise invalid_token()
 
 

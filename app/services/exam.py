@@ -1,8 +1,9 @@
 """AI-6 평가·재시험 출제 (evaluator, 심화), AI-7 학생 AI 문제 풀이 (student, 일반).
 
 AI-6
-  - 출제 계획(번호별 용어·유형)을 코드가 먼저 정한다: 재시험 focus 용어 → 없으면 전체 용어(중요한 순),
+  - 출제 계획(번호별 용어·유형)을 코드가 먼저 정한다: 재시험 focus 용어 → 없으면 전체 용어(체크리스트 순),
     유형은 question_types를 차례로 돌림. 요약정리에 내용이 없는 용어는 계획에서 뺀다.
+    용어가 문제 수보다 많으면 무작위로 문제 수만큼 고른다 (뒤쪽 용어가 늘 빠지지 않게).
   - 요약정리를 줄 번호(L1…)로 보여주고, 문제마다 근거 줄 번호 + 원문 인용을 받아 코드로 검증.
   - 정답 독립 검사(다른 호출)로 정답이 근거와 맞고 하나뿐인지 확인 → 통과한 문제만 쓴다.
   - 부족한 번호는 다시 출제(최대 3라운드). 그래도 count개가 안 되면 502 LLM_ERROR (명세: 정확히 count개).
@@ -82,6 +83,12 @@ def plan_slots(req: GenerateRequest, summary: ParsedSummary) -> list[Slot]:
         log_event("exam_focus_terms_skipped", logging.DEBUG,
                   message="요약정리에 내용이 없는 재시험 용어는 빼고 출제", requested=len(wanted), used=len(focus))
     targets: list[ExamTerm | None] = list(focus or usable) or [None]
+    if len(targets) > req.count:
+        # 용어가 문제 수보다 많으면 무작위로 count개를 고른다 (체크리스트 순서는 유지).
+        # 차례대로 배정하면 뒤쪽 용어는 한 번도 출제되지 않는다
+        # (실측: 용어 10개·5문항 → 1~5번만 출제, 틀리게 가르친 7번 '랜덤포레스트'를 평가가 못 잡음)
+        picked = sorted(random.sample(range(len(targets)), req.count))
+        targets = [targets[i] for i in picked]
     types = req.question_types
     return [Slot(i, targets[i % len(targets)], types[i % len(types)]) for i in range(req.count)]
 

@@ -18,7 +18,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 
-from ..grounding import normalize, numbers_unsupported, quote_in_any, split_sentences, unheard_terms
+from ..grounding import _negation_differs, normalize, numbers_unsupported, quote_in_any, split_sentences, unheard_terms
 from ..llm.router import Outcome, Task, call_structured, is_last_attempt
 from ..logging_setup import log_event
 from ..personas import note_check
@@ -55,6 +55,48 @@ def _bigrams(text: str) -> set[str]:
     return {t[i:i + 2] for i in range(len(t) - 1)}
 
 
+# 중복 줄: 짧은 줄의 글자 쌍이 긴 줄에 이만큼 있고, 긴 줄에 없는 글자 쌍이 이 개수 이하일 때만 같은 줄로 본다.
+# 일부러 엄격하게 잡았다 — 한 낱말만 다른 줄은 뜻이 다르다 (실측: "학습률이 높으면/낮으면 발산함"은 빠진 쌍 2개,
+# "분산을/과적합을 줄인대요"는 3개라서 남고, "이렇게 나누는 걸 분할이라고 해/한대요!"는 1개라서 지운다).
+DUP_RATIO = 0.85
+DUP_MAX_EXTRA = 1
+# 확인하지 않은 질문은 같은 궁금증으로 손을 여러 번 들어 생긴다. 질문 하나를 빼도 내용이 사라지지 않으므로 느슨하게 본다
+# (같은 용어 안에서만. 실측: "나무 결과를 어떻게 합치는지 궁금"과 "나무들 결과는 어떻게 합치는지 궁금해요"는 0.71)
+WONDER_DUP_RATIO = 0.6
+
+
+def _overlap(a: str, b: str) -> tuple[float, int]:
+    """(짧은 쪽 글자 쌍 중 긴 쪽에도 있는 비율, 짧은 쪽에만 있는 글자 쌍 수)."""
+    x, y = _bigrams(a), _bigrams(b)
+    short, long_ = (x, y) if len(x) <= len(y) else (y, x)
+    if not short:
+        return 0.0, 0
+    return len(short & long_) / len(short), len(short - long_)
+
+
+def is_duplicate_line(a: str, b: str) -> bool:
+    ratio, extra = _overlap(a, b)
+    return ratio >= DUP_RATIO and extra <= DUP_MAX_EXTRA and not _negation_differs(normalize(a), normalize(b))
+
+
+def is_duplicate_wonder(a: str, b: str) -> bool:
+    return _overlap(a, b)[0] >= WONDER_DUP_RATIO
+
+
+def dedupe(items: list[tuple[int, str]], same, same_term_only: bool) -> list[tuple[int, str]]:
+    """(용어, 글) 목록에서 비슷한 것끼리는 긴 글 하나만 남긴다. 자리(용어·순서)는 먼저 나온 쪽."""
+    keep: list[tuple[int, str]] = []
+    for term, text in items:
+        for i, (k_term, kept) in enumerate(keep):
+            if (not same_term_only or k_term == term) and same(text, kept):
+                if len(normalize(text)) > len(normalize(kept)):
+                    keep[i] = (k_term, text)
+                break
+        else:
+            keep.append((term, text))
+    return keep
+
+
 def missing_sentences(teacher: dict[int, str], lines: list[NoteLine]) -> list[str]:
     """노트에 담기지 않은 선생님 문장. 물음(?로 끝남)과 아주 짧은 말은 보지 않는다.
 
@@ -65,10 +107,18 @@ def missing_sentences(teacher: dict[int, str], lines: list[NoteLine]) -> list[st
         for r in ln.message_refs:
             pool.setdefault(r, set()).update(_bigrams(ln.text) | _bigrams(ln.evidence_quote))
     out = []
+    said: list[str] = []
     for k, content in teacher.items():
         for s in split_sentences(content):
             if (len(normalize(s)) < MIN_SENTENCE_CHARS or s.endswith(("?", "？")) or _INTRO.search(s.strip())
                     or _TRANSITION.search(s.strip())):
+                continue
+            # 앞에서 한 말을 되풀이한 문장("다시 말하지만 이렇게 나누는 걸 분할이라고 해.")은 다시 적으라고 하지 않는다
+            # (실측: 이 검사 때문에 같은 줄이 노트에 세 번 들어갔다). 기준은 중복 줄과 같이 엄격하게 —
+            # "지니 불순도가 0이면/1이면", "과적합이 줄어/심해져"처럼 바꿔 말한 틀린 설명은 건너뛰면 안 된다
+            repeated = any(is_duplicate_line(s, p) for p in said)
+            said.append(s)
+            if repeated:
                 continue
             g = _bigrams(s)
             if g and len(g & pool.get(k, set())) / len(g) < COVER_RATIO:
@@ -311,12 +361,25 @@ def write_note(req: NoteRequest) -> tuple[str, list[NoteTermSection]]:
             voice_problem = _voice_problem(req.persona.code, lines_all)
             if voice_problem:
                 fatal.append(voice_problem)
+            # 개념 칸은 배운 내용을 적는 곳이라 물음이 있으면 '확인하지 않은 질문'과 헷갈린다
+            # (실측: 민준 질문 글투 "제 말로 하면 ~거죠?"가 개념 줄에 들어감). 마지막 시도에서는 그대로 둔다
+            asking = [ln.text for ln in lines_all if "?" in ln.text or "？" in ln.text]
+            if asking:
+                shown = " / ".join(f"\"{t[:40]}\"" for t in asking[:3])
+                fatal.append(f"개념 줄에 물음표가 있습니다: {shown}. 개념 줄은 배운 내용을 적는 문장으로 쓰고 "
+                             "물음표를 쓰지 마세요 (\"~거죠?\" → \"~인 거다\").")
         dropped = total - len(lines_all)
 
         concept_lines: dict[int, list[str]] = {}
-        for term, ln in kept:
-            # 감탄 뒤 쉼표("오!, 큐는…")는 글투 예시 때문에 자주 붙는 군더더기라 정리한다
-            concept_lines.setdefault(term, []).append(re.sub(r"([!！])\s*,", r"\1", ln.text.strip()))
+        # 감탄 뒤 쉼표("오!, 큐는…")는 글투 예시 때문에 자주 붙는 군더더기라 정리한다
+        cleaned = [(term, re.sub(r"([!！])\s*,", r"\1", ln.text.strip())) for term, ln in kept]
+        # 거의 그대로 반복된 줄은 하나만 (실측: '분할' 설명이 세 번, 회귀나무·랜덤포레스트 줄이 반복됨).
+        # 빠짐 검사(missing_sentences)는 위에서 지우기 전 줄로 했으므로 영향 없음
+        for term, text in dedupe(cleaned, is_duplicate_line, same_term_only=False):
+            concept_lines.setdefault(term, []).append(text)
+        # 같은 궁금증으로 손을 여러 번 들면 거의 같은 질문이 여러 개 생긴다 → 같은 용어 안에서 하나로
+        merged = dedupe([(t, q.question) for t, q in wonders], is_duplicate_wonder, same_term_only=True)
+        wonders = [(t, NoteQuestion(status="unseen", question=text, answer=None)) for t, text in merged]
         return Outcome((concept_lines, assign, wonders), fatal=fatal)
 
     term_list = "\n".join(f"- term_id {t.term_id}: {t.name}" for t in req.terms) or "(용어 없음 — 모두 0)"
