@@ -103,6 +103,29 @@ def claim_verification_on() -> bool:
 
 
 _NOT_CHECKED = "검사를 받지 못했습니다."
+CHECK_ATTEMPTS = 2
+
+
+def run_check(call, *, event: str, count: int, strict: bool = False, **fields):
+    """검사 AI 호출. 호출 자체가 실패(LLM 오류·시간 초과·형식 불량)하면 한 번 더 부른다.
+
+    두 번 다 실패하면: strict=False → None (호출한 쪽이 코드 검증만으로 통과시킴),
+    strict=True → 마지막 오류를 그대로 올린다 (검사 없이 통과시키면 안 되는 용어 정의 등 → 502/504).
+    어느 쪽이든 운영 로그에서 보이도록 WARNING으로 남긴다.
+    """
+    last: Exception | None = None
+    for attempt in range(1, CHECK_ATTEMPTS + 1):
+        try:
+            return call()
+        except (LLMError, LLMTimeout, OutputRejected) as exc:
+            last = exc
+            final = attempt == CHECK_ATTEMPTS
+            result = ("요청 실패로 처리" if strict else f"새 항목 {count}개는 코드 검증만으로 통과") if final else "다시 부름"
+            log_event(event, logging.WARNING, message=f"검사 호출 실패 (시도 {attempt}/{CHECK_ATTEMPTS}) → {result}",
+                      error_code=getattr(exc, "code", "LLM_ERROR"), **fields)
+    if strict:
+        raise last
+    return None
 
 
 def verify_claims(task: Task, prompt: str, context: str, items: list[str],
@@ -114,9 +137,10 @@ def verify_claims(task: Task, prompt: str, context: str, items: list[str],
 
     - cache: 바깥 validate가 다시 불릴 때 같은 문장을 또 검사하지 않도록, 호출하는 쪽이 validate 밖에서
       만든 dict를 넘긴다. {항목 본문: 탈락 이유 또는 None(통과)}.
-    - 검사 호출 자체가 실패(LLM 오류·시간 초과)하면 이번에 새로 볼 항목은 통과시킨다. 이 항목들은 이미
-      코드 검증(인용·숫자)을 통과했고, 검사 호출 하나 때문에 다 만든 응답 전체를 502/504로 버리지 않기 위해서다.
-      통과시킨 항목은 캐시에 넣지 않으므로, 바깥이 다시 부르면 그때 다시 검사한다.
+    - 검사 호출 자체가 실패(LLM 오류·시간 초과)하면 한 번 더 부른다(run_check). 그래도 실패하면 이번에 새로 볼
+      항목은 통과시키고 WARNING을 남긴다. 이 항목들은 이미 코드 검증(인용·숫자)을 통과했고, 검사 호출 하나 때문에
+      다 만든 응답 전체를 502/504로 버리지 않기 위해서다 (요약·노트·풀이). 통과시킨 항목은 캐시에 넣지 않으므로,
+      바깥이 다시 부르면 그때 다시 검사한다.
     """
     if not items:
         return {}
@@ -124,12 +148,9 @@ def verify_claims(task: Task, prompt: str, context: str, items: list[str],
     todo = [i for i, body in enumerate(items) if body not in cache]
     missing: dict[int, str] = {}
     if todo:
-        try:
-            failed = _check(task, prompt, context, [items[i] for i in todo])
-        except (LLMError, LLMTimeout, OutputRejected) as exc:
-            log_event("claim_verification_skipped", logging.DEBUG,
-                      message=f"검사 호출 실패 → 새 항목 {len(todo)}개는 코드 검증만으로 통과",
-                      task=task.value, error_code=getattr(exc, "code", "LLM_ERROR"))
+        failed = run_check(lambda: _check(task, prompt, context, [items[i] for i in todo]),
+                           event="claim_verification_skipped", count=len(todo), task=task.value)
+        if failed is None:
             failed = {}
         else:
             for k, i in enumerate(todo):

@@ -43,7 +43,7 @@ from ..schemas.llm_outputs import (
     TermExtractionOutput,
     BatchSummaryOutput,
 )
-from .common import claim_verification_on, format_chunks, rules, verify_claims
+from .common import claim_verification_on, format_chunks, rules, run_check, verify_claims
 from .summary_doc import SummaryTerm, build_summary_markdown
 
 SUMMARY_TOP_K = 6
@@ -279,27 +279,22 @@ def _verify_definitions(terms: list[ExtractedTerm], cmap: dict[str, Chunk],
     다른 개념·식·예시를 정의로 가져온 것은 아닌지를 본다 (예: '학습률' 정의로 업데이트 식).
     본문 검사(verify_claims)와 같은 규칙:
     - cache {(이름, 정의, 근거 청크): 탈락 이유 또는 None}: 다시 부를 때 이미 본 용어는 검사하지 않는다.
-    - 검사 호출 자체가 실패(LLM 오류·시간 초과)하면 새 용어는 통과시킨다 (이미 인용·자료 대조를 통과함).
-      통과시킨 용어는 캐시하지 않으므로 다시 부르면 그때 다시 검사한다.
+    - 검사 호출 자체가 실패(LLM 오류·시간 초과)하면 한 번 더 부르고, 그래도 실패하면 통과시키지 않고 요청을
+      실패시킨다 (run_check strict). 정의는 체크리스트·요약·시험의 기준이라 검사받지 않은 정의를 쓰지 않는다.
     """
     cache = {} if cache is None else cache
     keys = [(t.name, t.definition, tuple(t.chunk_ids)) for t in terms]
     todo = [i for i, k in enumerate(keys) if k not in cache]
     missing: dict[int, str] = {}
     if todo:
-        try:
-            failed = _check_definitions([terms[i] for i in todo], cmap)
-        except (LLMError, LLMTimeout, OutputRejected) as exc:
-            log_event("definition_verification_skipped", logging.DEBUG,
-                      message=f"정의 검사 호출 실패 → 새 용어 {len(todo)}개는 코드 검증만으로 통과",
-                      error_code=getattr(exc, "code", "LLM_ERROR"))
-            failed = {}
-        else:
-            for k, i in enumerate(todo):
-                if failed.get(k) == _NOT_CHECKED:
-                    missing[i] = _NOT_CHECKED
-                else:
-                    cache[keys[i]] = failed.get(k)
+        # 용어 정의는 체크리스트·요약·시험 전체의 기준이라, 검사 없이 통과시키지 않는다 (두 번 실패하면 요청 실패)
+        failed = run_check(lambda: _check_definitions([terms[i] for i in todo], cmap),
+                           event="definition_verification_failed", count=len(todo), strict=True)
+        for k, i in enumerate(todo):
+            if failed.get(k) == _NOT_CHECKED:
+                missing[i] = _NOT_CHECKED
+            else:
+                cache[keys[i]] = failed.get(k)
     out = {i: cache[k] for i, k in enumerate(keys) if cache.get(k)}
     out.update(missing)
     if out:

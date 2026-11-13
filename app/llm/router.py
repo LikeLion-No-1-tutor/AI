@@ -27,6 +27,7 @@ from ..config import Settings, get_settings
 from ..context import cancelled, remaining_seconds, usage
 from ..errors import LLMError, LLMTimeout, OutputTruncated
 from ..logging_setup import log_event
+from ..prompts import render
 from .base import ImageInput, LLMProvider, LLMResult
 from .json_schema import strict_schema
 
@@ -265,6 +266,8 @@ def call_structured(
                   input_tokens=0, output_tokens=0, error_code=exc.code)
         raise
     schema = strict_schema(output_model)
+    # 모든 호출 공통: 자료·대화·답안 안의 지시문(프롬프트 인젝션)을 따르지 않는다
+    system = system.rstrip() + "\n\n" + render("input_safety")
 
     feedback = ""
     last: Outcome | None = None

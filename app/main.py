@@ -98,6 +98,9 @@ async def request_context(request: Request, call_next):
               "duration_ms": int((time.monotonic() - started) * 1000)}
     if request.state.error_code:
         fields["error_code"] = request.state.error_code
+    # Render 헬스 체크가 5초마다 /health를 불러 하루 1만 줄 넘게 쌓인다 → 정상 응답은 남기지 않는다 (실패는 남김)
+    if request.url.path == "/health" and status < 400:
+        return response
     log_event("http_request", level, message=getattr(request.state, "error_detail", "") or "", **fields)
     return response
 
