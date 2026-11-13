@@ -48,6 +48,16 @@ _INTRO = re.compile(r"^(자,?\s*)?(오늘|이번\s*시간|지금부터|이제부
 # (실측: 빠짐 검사 때문에 "다음 순서는 큐예요" 같은 줄이 개념에 들어갔다)
 _TRANSITION = re.compile(r"^(자,?\s*)?(오늘은|이번에는|이번엔|다음은|다음으로|그럼|이제)\s*\S{1,15}?"
                          r"(부터\s*(할게|하자|볼게|시작할게|시작하자)|(이)?야|(으)?로\s*넘어가(자|볼게|겠습니다)?)[.!]?$")
+# 학생에게 차례를 넘기는 말("궁금한 거 있으면 물어봐.")도 내용이 아니다. 물음표가 없어서 빠짐 검사에 걸렸다
+# (실측: 3회 중 2회 "궁금한 거 있으면 물어보래요."가 개념 줄에 들어가고, 매번 첫 시도가 떨어짐).
+# lesson.py의 _HANDOFF_END는 '끝나', '여기까지'처럼 설명 문장에도 나오는 말을 잡으므로 쓰지 않고,
+# 문장 전체가 넘김 말일 때만 맞도록 좁게 잡는다
+_HANDOFF_SENTENCE = re.compile(
+    r"^(자,?\s*|그럼,?\s*|혹시,?\s*)*"
+    r"(((궁금한|모르는|헷갈리는|이해\s*안\s*되는|이해가\s*안\s*되는)\s*(거|것|게|점|부분)(이|가)?|질문(이)?)\s*(있으면|있다면)"
+    r"|이해\s*안\s*되면|이해가\s*안\s*되면|모르겠으면|헷갈리면)"
+    r"\s*(언제든지?\s*)?(다시\s*)?"
+    r"(물어봐|물어보세요|물어봐도\s*돼|질문해|질문하세요|말해|말해줘|말씀하세요|얘기해|해|해줘)(요)?\s*[.!~]*$")
 
 
 def _bigrams(text: str) -> set[str]:
@@ -98,7 +108,7 @@ def dedupe(items: list[tuple[int, str]], same, same_term_only: bool) -> list[tup
 
 
 def missing_sentences(teacher: dict[int, str], lines: list[NoteLine]) -> list[str]:
-    """노트에 담기지 않은 선생님 문장. 물음(?로 끝남)과 아주 짧은 말은 보지 않는다.
+    """노트에 담기지 않은 선생님 문장. 물음(?로 끝남), 아주 짧은 말, 수업 예고·순서 안내·넘김 말은 보지 않는다.
 
     학생 AI가 의심스럽다고 스스로 거르는 것(예: '보통 다 잘 맞혀.')을 막는다. 틀린 말도 노트에 남아야 한다.
     """
@@ -111,7 +121,7 @@ def missing_sentences(teacher: dict[int, str], lines: list[NoteLine]) -> list[st
     for k, content in teacher.items():
         for s in split_sentences(content):
             if (len(normalize(s)) < MIN_SENTENCE_CHARS or s.endswith(("?", "？")) or _INTRO.search(s.strip())
-                    or _TRANSITION.search(s.strip())):
+                    or _TRANSITION.search(s.strip()) or _HANDOFF_SENTENCE.search(s.strip())):
                 continue
             # 앞에서 한 말을 되풀이한 문장("다시 말하지만 이렇게 나누는 걸 분할이라고 해.")은 다시 적으라고 하지 않는다
             # (실측: 이 검사 때문에 같은 줄이 노트에 세 번 들어갔다). 기준은 중복 줄과 같이 엄격하게 —
