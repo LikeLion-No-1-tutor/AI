@@ -260,6 +260,18 @@ def analyze(req: AnalyzeRequest) -> tuple[list[TermUpdate], HandRaise | None, st
 
 # 아래첨자 기호 표기 (h_t, x_{t-1}, W_hh …). 선생님이 쓴 표기만 쓸 수 있다 (h_t를 듣고 h_{t-1}을 만들면 안 됨)
 _NOTATION = re.compile(r"[A-Za-z][A-Za-z0-9]*_(?:\{[^{}\s]+\}|[A-Za-z0-9+\-]+)")
+# 글투 블록 제목("[질문]")을 질문 앞에 따라 붙이는 경우가 있다 (실측: 서연 30개 중 2개) → 맨 앞 꼬리표만 뗀다
+_LEADING_LABEL = re.compile(r"^\s*\[[^\[\]\n]{1,12}\]\s*")
+# 물음표 하나로 다시 쓰라고 하면 물음표를 아예 빼고 "~나요."로 끝내기도 한다 (실측: 서연 3개).
+# 묻는 끝맺음일 때만 마지막 마침표를 물음표로 바꾼다 ("궁금합니다.", "설명해 주세요."는 그대로)
+_ASKING_END = re.compile(r"(나요|까요|가요|니까|는지요)\s*\.?\s*$")
+
+
+def tidy_question(text: str) -> str:
+    text = _LEADING_LABEL.sub("", text.strip()).strip()
+    if "?" not in text and "？" not in text and _ASKING_END.search(text):
+        text = text.rstrip(". ") + "?"
+    return text
 
 
 def make_question(req: QuestionRequest) -> str:
@@ -269,7 +281,7 @@ def make_question(req: QuestionRequest) -> str:
     heard_norm = normalize(" ".join(heard))
 
     def validate(out: QuestionMakeOutput) -> Outcome[str]:
-        text = out.question.strip()
+        text = tidy_question(out.question)
         if not text:
             return Outcome("", fatal=["question이 비어 있습니다."])
         if any(same_text(text, a) for a in asked):
@@ -277,7 +289,8 @@ def make_question(req: QuestionRequest) -> str:
         if not is_last_attempt():
             # 한 번에 하나만 묻는다: 물음표가 둘 이상이면 선생님이 무엇에 답할지 흐려진다
             if text.count("?") + text.count("？") > 1:
-                return Outcome(text, fatal=["물음표가 두 개 이상입니다. 가장 궁금한 질문 하나만, 물음표 하나로 쓰세요."])
+                return Outcome(text, fatal=["물음표가 두 개 이상입니다. 가장 궁금한 질문 하나만 남기고, "
+                                            "물음표(?)는 정확히 하나를 질문 문장 끝에 쓰세요 (물음표를 빼지 마세요)."])
             notation = [n for n in _NOTATION.findall(text) if normalize(n) not in heard_norm]
             if notation:
                 return Outcome(text, fatal=[f"선생님이 쓰지 않은 기호 표기({', '.join(notation)})가 있습니다. "
