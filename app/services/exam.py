@@ -13,6 +13,7 @@ AI-6
 AI-7
   - 학생 AI는 수업 대화만 본다. 답을 냈다면 근거 선생님 메시지 번호 + 원문 인용이 있어야 하고,
     검증을 통과하지 못하면 '모르겠어요'로 바꾼다 (아는 척 방지).
+    검사 호출 자체가 두 번 다 실패하면 검사받지 않은 답을 내보내지 않고 요청을 실패시킨다 (502/504).
 """
 from __future__ import annotations
 
@@ -326,7 +327,7 @@ def solve_exam(req: SolveRequest) -> list[SolveAnswer]:
                 if q.question_type == QuestionType.MULTIPLE_CHOICE and q.choices:
                     shown = f"[{answers[n]}] {q.choices[int(answers[n])]}"
                 items.append(f"문제: {q.content}\n학생 답: {shown}\n인용한 메시지: {', '.join(map(str, refs_by_number[n]))}")
-            failed = verify_claims(Task.SOLVE_VERIFY, "solve_verify", context, items, verify_cache)
+            failed = verify_claims(Task.SOLVE_VERIFY, "solve_verify", context, items, verify_cache, strict=True)
             for k, comment in sorted(failed.items()):
                 n = known[k]
                 fatal.append(f"{n}번: 검사 탈락 — {comment} 수업에서 들은 말로 답할 수 없으면 knows=false로 두세요.")

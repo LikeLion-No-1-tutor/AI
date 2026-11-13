@@ -263,6 +263,11 @@ def extract_terms(ctx: MaterialContext) -> list[TermBrief]:
                              output_model=TermExtractionOutput, validate=validate)
     if not result.value:
         raise unreadable("자료에서 근거가 확인되는 용어를 찾지 못함")
+    if len(result.value) < min_ok:
+        # 검증을 통과한 용어만 내보낸다 (실패시키면 수업을 시작할 수 없음). 품질 저하는 운영 로그로 알린다
+        log_event("terms_below_min", logging.WARNING,
+                  message=f"검증을 통과한 용어 {len(result.value)}개 (최소 {min_ok}개 미달) → 통과한 용어만 반환",
+                  returned=len(result.value), min_required=min_ok, max_count=count)
     if result.warnings:
         log_event("terms_dropped", logging.DEBUG, dropped=len(result.warnings))
     return [TermBrief(name=t.name, definition=t.definition) for t in result.value]

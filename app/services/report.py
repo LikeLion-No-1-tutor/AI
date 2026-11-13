@@ -5,18 +5,22 @@ AI는 문장 두 가지만 만든다. 점수·놓친 개념·점수 비교는 Dj
 - review_recommendations: 대상 = explained가 아닌 용어 + 관련 오답이 있는 용어.
   대상이 아닌 term_id는 버리고, 빠진 대상은 코드가 용어 정의로 기본 문장을 채운다.
   정의와 어긋나게 설명한 용어는 "~는 맞게 설명했지만, '~'라고 설명한 부분은 자료와 달라요" 꼴로 쓰고,
-  어긋난 부분(wrong_quote)·맞은 부분(right_quote)이 선생님 메시지 원문에 있는지 코드가 확인한다.
+  어긋난 부분(wrong_quote)·맞은 부분(right_quote)이 선생님 메시지 원문에 있는지 코드가 확인하고,
+  그 지적이 정말 정의와 어긋나는지 별개 검사 AI(report_verify)가 다시 본다. 확인되지 않으면 일반 복습 문장.
 """
 from __future__ import annotations
 
-from ..errors import validation_error
+import logging
+
+from ..errors import LLMError, LLMTimeout, validation_error
 from ..grounding import quote_in_any
-from ..llm.router import Outcome, Task, call_structured
+from ..llm.router import Outcome, OutputRejected, Task, call_structured
 from ..prompts import render
 from ..schemas.api import Recommendation, ReportRequest
 from ..schemas.enums import TermStatus
 from ..schemas.llm_outputs import LLMRecommendation, LLMStrength, ReportOutput
-from .common import index_messages, rules
+from ..logging_setup import log_event
+from .common import claim_verification_on, index_messages, rules, teacher_context, verify_claims
 
 MAX_STRENGTHS = 3
 
@@ -45,6 +49,33 @@ def recommendation_problem(r: LLMRecommendation, teacher_texts: list[str]) -> st
     elif _DIFFERS in r.text:
         return "'자료와 달라요'라고 쓰려면 어긋난 부분을 wrong_quote에 선생님 메시지 원문 그대로 복사하세요."
     return None
+
+
+def check_differences(recs: list[LLMRecommendation], term_map: dict, indexed) -> set[int]:
+    """'자료와 달라요' 지적을 별개 검사 AI가 정의와 다시 대조한다. 확인되지 않은 지적의 term_id를 돌려준다.
+
+    인용이 선생님 메시지에 있다는 것(코드 검사)만으로는 그 말이 정말 틀렸는지 알 수 없다. 잘못된 지적은
+    선생님에게 틀린 피드백이 되므로 보수적으로: 검사에서 떨어지거나, 검사 호출이 두 번 다 실패하면 그 용어는
+    일반 복습 문장(fallback_recommendation)으로 바꾼다.
+    """
+    claims = [r for r in recs if r.wrong_quote and r.wrong_quote.strip()]
+    if not claims or not claim_verification_on():
+        return set()
+    items = []
+    for r in claims:
+        t = term_map[r.term_id]
+        right = f"\n맞은 부분: '{r.right_quote.strip()}'" if r.right_quote and r.right_quote.strip() else ""
+        items.append(f"용어: {t.name}\n정의: {t.definition}\n어긋난 부분: '{r.wrong_quote.strip()}'{right}")
+    try:
+        failed = verify_claims(Task.REPORT_VERIFY, "report_verify", teacher_context(indexed), items, strict=True)
+    except (LLMError, LLMTimeout, OutputRejected):
+        failed = dict.fromkeys(range(len(claims)), "검사 호출 실패")
+    rejected = {claims[i].term_id for i in failed}
+    if rejected:
+        log_event("report_difference_rejected", logging.WARNING,
+                  message=f"'자료와 달라요' 지적 {len(rejected)}/{len(claims)}개가 확인되지 않아 일반 복습 문장으로 바꿈",
+                  rejected=len(rejected), total=len(claims))
+    return rejected
 
 
 def check_exam_numbers(req: ReportRequest) -> None:
@@ -118,8 +149,10 @@ def write_report(req: ReportRequest) -> tuple[list[str], list[Recommendation]]:
         out = ReportOutput(strengths=[], review_recommendations=[])
 
     by_term = {}
+    rejected = check_differences(out.review_recommendations, term_map, indexed)
     for r in out.review_recommendations:
-        by_term.setdefault(r.term_id, r.text.strip())
+        if r.term_id not in rejected:
+            by_term.setdefault(r.term_id, r.text.strip())
     recommendations = [
         Recommendation(term_id=i, text=by_term.get(i) or fallback_recommendation(term_map[i].name, term_map[i].definition))
         for i in targets

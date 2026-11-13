@@ -57,6 +57,7 @@ class Task(str, Enum):
     EXAM_SOLVE = "exam_solve"
     EXAM_GRADE = "exam_grade"
     REPORT = "report"
+    REPORT_VERIFY = "report_verify"
 
 
 TASK_TIER: dict[Task, str] = {
@@ -78,6 +79,7 @@ TASK_TIER: dict[Task, str] = {
     Task.NOTE: "light",
     Task.EXAM_SOLVE: "light",
     Task.REPORT: "light",
+    Task.REPORT_VERIFY: "deep",
 }
 
 # API 명세의 usage.role
@@ -100,6 +102,7 @@ TASK_ROLE: dict[Task, str] = {
     Task.EXAM_VERIFY: "evaluator",
     Task.EXAM_GRADE: "evaluator",
     Task.REPORT: "report",
+    Task.REPORT_VERIFY: "report",
 }
 
 

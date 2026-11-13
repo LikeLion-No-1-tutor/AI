@@ -129,7 +129,7 @@ def run_check(call, *, event: str, count: int, strict: bool = False, **fields):
 
 
 def verify_claims(task: Task, prompt: str, context: str, items: list[str],
-                  cache: dict[str, str | None] | None = None) -> dict[int, str]:
+                  cache: dict[str, str | None] | None = None, strict: bool = False) -> dict[int, str]:
     """만든 AI와 별개인 검사 호출 한 번으로, 항목마다 '주어진 근거만으로 이 문장이 나오는가'를 본다.
 
     인용 검증은 근거 문장이 원문에 있는지만 본다. 여기서는 본문이 그 근거와 같은 말인지를 본다.
@@ -139,8 +139,9 @@ def verify_claims(task: Task, prompt: str, context: str, items: list[str],
       만든 dict를 넘긴다. {항목 본문: 탈락 이유 또는 None(통과)}.
     - 검사 호출 자체가 실패(LLM 오류·시간 초과)하면 한 번 더 부른다(run_check). 그래도 실패하면 이번에 새로 볼
       항목은 통과시키고 WARNING을 남긴다. 이 항목들은 이미 코드 검증(인용·숫자)을 통과했고, 검사 호출 하나 때문에
-      다 만든 응답 전체를 502/504로 버리지 않기 위해서다 (요약·노트·풀이). 통과시킨 항목은 캐시에 넣지 않으므로,
+      다 만든 응답 전체를 502/504로 버리지 않기 위해서다 (요약·노트). 통과시킨 항목은 캐시에 넣지 않으므로,
       바깥이 다시 부르면 그때 다시 검사한다.
+    - strict=True(AI-7 풀이, AI-9 보고서 검사): 두 번 다 실패하면 통과시키지 않고 오류를 올린다.
     """
     if not items:
         return {}
@@ -149,7 +150,7 @@ def verify_claims(task: Task, prompt: str, context: str, items: list[str],
     missing: dict[int, str] = {}
     if todo:
         failed = run_check(lambda: _check(task, prompt, context, [items[i] for i in todo]),
-                           event="claim_verification_skipped", count=len(todo), task=task.value)
+                           event="claim_verification_skipped", count=len(todo), strict=strict, task=task.value)
         if failed is None:
             failed = {}
         else:
