@@ -2,7 +2,8 @@
 
 공통 필드: ts(한국 시간, 밀리초), level, service("ai"), env, request_id, event, message(선택)
 남기지 않는 것: 원본 자료, 사용자가 쓴 내용, AI가 만든 내용, 프롬프트, 인증 정보
-예외: llm_invalid_output의 raw_output(앞 2,000자). DEBUG는 local에서만 찍힘.
+예외: llm_invalid_output의 raw_output(앞 2,000자), llm_grounding_detail의 problems(검증 실패 이유 — 선생님 문장 인용 포함).
+      둘 다 LOG_RAW_OUTPUT=false면 남기지 않는다. DEBUG는 local에서만 찍힘.
 """
 from __future__ import annotations
 

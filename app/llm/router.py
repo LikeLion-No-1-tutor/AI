@@ -5,7 +5,8 @@
      → 그래도 실패하면 근거가 확인된 부분만 쓰거나(accept_after_retries) 502 LLM_ERROR
 
 시간 예산: 요청마다 context.begin()으로 정한 예산(실시간 25초, 백그라운드 170초) 안에서만 부른다.
-로그: llm_call(호출마다), llm_invalid_output(형식·근거 검증 실패, raw_output 앞 2,000자)
+로그: llm_call(호출마다), llm_invalid_output(형식·근거 검증 실패, raw_output 앞 2,000자),
+      llm_grounding_detail(근거 검증 실패 이유, 15건·건당 300자까지. LOG_RAW_OUTPUT=false면 안 찍음)
 """
 from __future__ import annotations
 
@@ -305,7 +306,11 @@ def call_structured(
         log_event("llm_invalid_output", logging.WARNING,
                   message=f"근거 검증 실패 {len(outcome.fatal)}건 (시도 {attempt}/{attempts})",
                   role=role, model=tier.model, **_raw(result.text))
-        log_event("llm_grounding_detail", logging.DEBUG, role=role, problems=outcome.fatal[:15])
+        # 왜 다시 시도했는지 운영 로그에서 바로 보이게 WARNING. 실패 이유에 선생님 문장 인용이 들어가므로
+        # raw_output과 같은 스위치(LOG_RAW_OUTPUT)를 따른다 — false면 찍지 않는다 (건수는 위 message에 있음)
+        if get_settings().log_raw_output:
+            log_event("llm_grounding_detail", logging.WARNING, role=role,
+                      problems=[msg[:300] for msg in outcome.fatal[:15]])
 
     if last is not None and accept_after_retries:
         # 근거가 확인되지 않은 항목은 validate가 이미 뺐다 → 남은 부분만 쓴다

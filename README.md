@@ -174,7 +174,9 @@ def note_payload(lesson):
 - LLM 동시 호출은 `LLM_GLOBAL_CONCURRENCY`(기본 8)로 묶입니다. 차례를 기다리다 시간 예산을 넘으면 `504 LLM_TIMEOUT`.
   - 이 상한은 **서버 프로세스 하나 기준**입니다. 위 실행 명령(프로세스 1개)이 권장 구성입니다. `--workers N`으로 여러 개를 띄우면 전체 상한은 N × 값이 되므로, 전체를 8로 두려면 값을 `8 ÷ N`으로 낮추세요 (여러 서버에 걸친 공유 제한이 필요하면 Redis 같은 별도 장치가 필요합니다).
 - `llm_invalid_output` 로그의 `raw_output`(AI 응답 앞 2,000자)은 **명세의 로그 규칙**이라 기본으로 남깁니다. 이 안에 자료·대화 일부가 들어갈 수 있으니, 운영 로그 보관 기간과 접근 권한을 제한하세요.
-  - 팀에서 운영 로그에 원문을 남기지 않기로 정하면 `.env`에 `LOG_RAW_OUTPUT=false`를 넣습니다. 필드 이름은 그대로 두고 값만 `[생략: 1234자]`로 바뀝니다 (명세 로그 규칙도 함께 고치세요).
+  - 바로 다음 줄에 `llm_grounding_detail`(WARNING)로 **왜 떨어졌는지**(검증 실패 이유, 최대 15건·건당 300자)도 남깁니다. 재시도 원인을 운영 로그에서 바로 보려는 것이고, 이유에 선생님 문장 인용이 들어갈 수 있습니다.
+  - 팀에서 운영 로그에 원문을 남기지 않기로 정하면 `.env`에 `LOG_RAW_OUTPUT=false`를 넣습니다. `raw_output`은 필드 이름은 그대로 두고 값만 `[생략: 1234자]`로 바뀌고, `llm_grounding_detail`은 찍히지 않습니다 (실패 건수는 `llm_invalid_output`의 message에 남음). 명세 로그 규칙도 함께 고치세요.
+  - 채점 이유(`grade_reasons`)는 DEBUG라 운영 로그에 남지 않습니다. 채점 이유는 `/exams/grade` 응답의 `reason`으로 Django에 넘어가므로 Django 쪽에서 확인하세요.
 - 업로드 파일: Starlette가 1MB를 넘는 업로드를 받는 동안 **디스크 임시 파일**에 잠깐 저장하고, 요청이 끝나면 지웁니다 (우리 코드가 아니라 프레임워크 동작). 그 뒤 처리(PDF를 이미지로 바꾸기, 이미지 줄이기)는 메모리에서만 하고 따로 파일을 만들지 않습니다. PDF는 `with`로 열어 오류·시간 초과 때도 닫힙니다.
 - LLM에 보내는 이미지(사진 업로드, 그림이 있는 PDF 쪽)는 긴 변을 1,568px 이하로 줄여 보냅니다. 이미지 형식은 확장자가 아니라 파일 앞 바이트로 판별하고, PNG·JPG·WebP가 아니면 `422 UNREADABLE_MATERIAL`입니다 (WebP는 Pillow로 PNG로 바꿔서 보냄. Django가 WebP를 받는 것은 4장 8번).
 - PDF의 쪽 분석·렌더링(LLM 호출이 아닌 CPU 작업)도 요청 시간 예산 안에서 합니다. 넘으면 `504 LLM_TIMEOUT`.
@@ -289,7 +291,7 @@ scripts/check_llm.py   키·모델 연결 점검 (서버 없이)
 | `ENABLE_ANSWER_VERIFICATION` | true | 출제 후 정답이 요약정리로 뒷받침되는지 한 번 더 검사 |
 | `ENABLE_DEFINITION_VERIFICATION` | true | AI-1 정의가 근거 청크로 뒷받침되고 그 용어 자체의 정의인지 한 번 더 검사 (LLM 1회 추가) |
 | `ENABLE_CLAIM_VERIFICATION` | true | AI-2 요점·관계, AI-5 노트, AI-7 풀이의 본문이 근거와 같은 말인지 한 번 더 검사 (기능마다 LLM 1회 추가) |
-| `LOG_RAW_OUTPUT` | true | 검증 실패 로그에 AI 응답 원문(앞 2,000자)을 남길지 (5장) |
+| `LOG_RAW_OUTPUT` | true | 검증 실패 로그에 AI 응답 원문(앞 2,000자)과 실패 이유(`llm_grounding_detail`)를 남길지 (5장) |
 
 - 숫자가 아니거나 최솟값보다 작으면 서버가 켜질 때 바로 오류를 냅니다 (`MIN_TERMS`가 `MAX_TERMS`보다 커도 오류).
 - true/false 값은 `true·false·1·0·yes·no·on·off`만 받습니다. `treu` 같은 오타도 켜질 때 오류입니다 (전에는 오타면 조용히 false가 되어 검증이 꺼질 수 있었음).
