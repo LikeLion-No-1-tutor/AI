@@ -6,7 +6,9 @@ AI-6
     용어가 문제 수보다 많으면 무작위로 문제 수만큼 고른다 (뒤쪽 용어가 늘 빠지지 않게).
   - 요약정리를 줄 번호(L1…)로 보여주고, 문제마다 근거 줄 번호 + 원문 인용을 받아 코드로 검증.
   - 정답 독립 검사(다른 호출)로 정답이 근거와 맞고 하나뿐인지 확인 → 통과한 문제만 쓴다.
-  - 부족한 번호는 다시 출제(최대 3라운드). 그래도 count개가 안 되면 502 LLM_ERROR (명세: 정확히 count개).
+  - 부족한 번호는 다시 출제(최대 3라운드). 그래도 모자라면 통과한 문제만 돌려준다 (count개보다 적을 수 있음, 0개면 502).
+    Django는 받은 문제 수로 question_count를 다시 저장한다 (2026-11-13. 전엔 1문제 때문에 통과한 2문제까지 버리고 502).
+  - 떨어진 문제는 이유를 WARNING 로그(exam_question_rejected)로 남긴다. 응답에는 넣지 않는다.
   - 객관식 보기 순서는 코드가 섞고 정답 인덱스(0부터)를 다시 계산.
 AI-7
   - 학생 AI는 수업 대화만 본다. 답을 냈다면 근거 선생님 메시지 번호 + 원문 인용이 있어야 하고,
@@ -110,10 +112,12 @@ def _answer_text(q: LLMQuestion) -> str:
     return q.correct_answer
 
 
-def _generate_round(req: GenerateRequest, summary: ParsedSummary, slots: list[Slot],
-                    seen: list[str], strict: bool = True) -> list[LLMQuestion]:
+def _generate_round(req: GenerateRequest, summary: ParsedSummary, slots: list[Slot], seen: list[str],
+                    strict: bool = True) -> tuple[list[LLMQuestion], dict[int, str]]:
+    """돌려주는 값: (형식·근거 검사를 통과한 문제, 통과하지 못한 slot → 마지막 이유)."""
     lines = summary.by_number()
     slot_by_index = {s.index: s for s in slots}
+    reasons: dict[int, str] = {}
 
     def check(q: LLMQuestion, taken: list[str]) -> str | None:
         slot = slot_by_index.get(q.slot)
@@ -158,6 +162,7 @@ def _generate_round(req: GenerateRequest, summary: ParsedSummary, slots: list[Sl
             problem = check(q, taken)
             if problem:
                 fatal.append(problem)
+                reasons[q.slot] = problem
                 continue
             if q.question_type == QuestionType.MULTIPLE_CHOICE:
                 choices = [c.strip() for c in q.choices or []]
@@ -181,11 +186,14 @@ def _generate_round(req: GenerateRequest, summary: ParsedSummary, slots: list[Sl
     seen_block = "\n".join(f"- {s}" for s in seen) or "(없음)"
     system = render("exam_generate", audience=audience, rules=rules())
     user = f"[출제 계획]\n{plan}\n\n[요약정리 — 줄 번호]\n{summary.format()}\n\n[이미 낸 문제]\n{seen_block}"
-    return call_structured(Task.EXAM_GENERATE, system=system, user=user,
+    made = call_structured(Task.EXAM_GENERATE, system=system, user=user,
                            output_model=ExamGenerationOutput, validate=validate).value
+    made_slots = {q.slot for q in made}
+    return made, {s.index: reasons.get(s.index, "문제를 내지 않음") for s in slots if s.index not in made_slots}
 
 
-def _verify(questions: list[LLMQuestion], summary: ParsedSummary) -> dict[int, bool]:
+def _verify(questions: list[LLMQuestion], summary: ParsedSummary) -> dict[int, tuple[bool, str]]:
+    """slot → (통과 여부, 검토 AI의 comment)."""
     lines = summary.by_number()
     blocks = []
     for q in questions:
@@ -195,14 +203,22 @@ def _verify(questions: list[LLMQuestion], summary: ParsedSummary) -> dict[int, b
                       f"  정답: {q.correct_answer}\n  근거:\n{evidence}")
     slots = {q.slot for q in questions}
 
-    def validate(out: AnswerVerificationOutput) -> Outcome[dict[int, bool]]:
-        result = {c.slot: c.answer_supported and c.single_correct_answer for c in out.checks if c.slot in slots}
+    def validate(out: AnswerVerificationOutput) -> Outcome[dict[int, tuple[bool, str]]]:
+        result = {}
+        for c in out.checks:
+            if c.slot in slots and c.slot not in result:
+                why = []
+                if not c.answer_supported:
+                    why.append("정답이 근거로 뒷받침되지 않음")
+                if not c.single_correct_answer:
+                    why.append("정답이 하나가 아니거나 모호함")
+                result[c.slot] = (not why, f"{', '.join(why) or '통과'} — {c.comment}")
         missing = sorted(slots - set(result))
         return Outcome(result, fatal=[f"검사가 빠진 slot: {missing}"] if missing else [])
 
     checked = call_structured(Task.EXAM_VERIFY, system=render("exam_verify"), user="\n\n".join(blocks),
                               output_model=AnswerVerificationOutput, validate=validate).value
-    return {slot: checked.get(slot, False) for slot in slots}   # 검사가 빠지면 통과시키지 않음
+    return {slot: checked.get(slot, (False, "정답 검사 결과가 없음")) for slot in slots}   # 검사가 빠지면 통과시키지 않음
 
 
 def generate_exam(req: GenerateRequest) -> list[GeneratedQuestion]:
@@ -219,21 +235,35 @@ def generate_exam(req: GenerateRequest) -> list[GeneratedQuestion]:
         if not todo:
             break
         # 마지막 라운드에서는 '이름 맞히기 금지'를 풀어서, 문제 수(count)를 못 채우는 일을 막는다
-        made = _generate_round(req, summary, todo, seen + [q.content for q in accepted.values()],
-                               strict=round_no < MAX_ROUNDS)
-        passed = _verify(made, summary) if (verify and made) else {q.slot: True for q in made}
+        made, rejected = _generate_round(req, summary, todo, seen + [q.content for q in accepted.values()],
+                                         strict=round_no < MAX_ROUNDS)
+        passed = _verify(made, summary) if (verify and made) else {q.slot: (True, "") for q in made}
         for q in made:
             seen.append(q.content)   # 떨어진 문제도 다시 내지 않게
-            if passed.get(q.slot):
+            ok, comment = passed.get(q.slot, (False, "정답 검사 결과가 없음"))
+            if ok:
                 accepted[q.slot] = q
+            else:
+                rejected[q.slot] = f"정답 검사 탈락: {comment} | 문제: {q.content[:150]} | 정답: {_answer_text(q)[:80]}"
+        for index, reason in sorted(rejected.items()):
+            slot = slots[index]
+            log_event("exam_question_rejected", logging.WARNING, message=f"{index + 1}번 문제 탈락 (라운드 {round_no}/{MAX_ROUNDS})",
+                      kind=req.kind.value, slot=index + 1, term=slot.term.name if slot.term else None,
+                      question_type=slot.question_type.value, round=round_no, reason=reason[:500])
 
-    if len(accepted) < len(slots):
-        raise OutputRejected(f"검증을 통과한 문제가 {len(accepted)}/{len(slots)}개뿐입니다.")
+    if not accepted:
+        raise OutputRejected(f"검증을 통과한 문제가 0/{len(slots)}개입니다.")
+    done = [s for s in slots if s.index in accepted]
+    if len(done) < len(slots):
+        # 통과한 문제만 돌려준다 (Django가 받은 수로 question_count를 다시 저장)
+        log_event("exam_partial", logging.WARNING, message=f"검증을 통과한 문제 {len(done)}/{len(slots)}개만 보냄",
+                  kind=req.kind.value, requested=len(slots), returned=len(done),
+                  dropped_terms=[s.term.name if s.term else None for s in slots if s.index not in accepted])
     out = []
-    for s in slots:
+    for number, s in enumerate(done, 1):
         q = _shuffle(accepted[s.index])
         out.append(GeneratedQuestion(
-            number=s.index + 1, question_type=q.question_type, content=q.content.strip(),
+            number=number, question_type=q.question_type, content=q.content.strip(),
             choices=q.choices, correct_answer=q.correct_answer, explanation=q.explanation.strip(),
             term_id=s.term.term_id if s.term else None,
         ))
