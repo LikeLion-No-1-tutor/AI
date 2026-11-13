@@ -11,8 +11,6 @@ from .edition import EDITION, EDITIONS
 
 load_dotenv()
 
-TIERS = ("light", "deep", "judge")
-
 
 def _env(name: str, default: str = "") -> str:
     value = os.getenv(name)

@@ -131,14 +131,6 @@ def is_last_attempt() -> bool:
 _providers: dict[str, LLMProvider] = {}
 
 
-def set_provider(name: str, provider: LLMProvider) -> None:
-    _providers[name] = provider
-
-
-def reset_providers() -> None:
-    _providers.clear()
-
-
 def get_provider(name: str, settings: Settings | None = None) -> LLMProvider:
     if name in _providers:
         return _providers[name]
