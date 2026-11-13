@@ -207,6 +207,9 @@ class LLMStrength(BaseModel):
 class LLMRecommendation(BaseModel):
     term_id: int
     text: str
+    # 자료(정의)와 어긋나게 설명한 부분 / 같은 설명 중 맞게 한 부분 — 선생님 메시지 원문 인용 (코드가 확인)
+    wrong_quote: str | None = None
+    right_quote: str | None = None
 
 
 class ReportOutput(BaseModel):
