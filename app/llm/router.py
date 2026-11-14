@@ -5,7 +5,8 @@
      → 그래도 실패하면 근거가 확인된 부분만 쓰거나(accept_after_retries) 502 LLM_ERROR
 
 시간 예산: 요청마다 context.begin()으로 정한 예산(실시간 25초, 백그라운드 170초) 안에서만 부른다.
-로그: llm_call(호출마다), llm_invalid_output(형식·근거 검증 실패, raw_output 앞 2,000자)
+로그: llm_call(호출마다), llm_invalid_output(형식·근거 검증 실패, raw_output 앞 2,000자),
+      llm_grounding_detail(근거 검증 실패 이유, 15건·건당 300자까지. LOG_RAW_OUTPUT=false면 안 찍음)
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from ..config import Settings, get_settings
 from ..context import cancelled, remaining_seconds, usage
 from ..errors import LLMError, LLMTimeout, OutputTruncated
 from ..logging_setup import log_event
+from ..prompts import render
 from .base import ImageInput, LLMProvider, LLMResult
 from .json_schema import strict_schema
 
@@ -55,6 +57,7 @@ class Task(str, Enum):
     EXAM_SOLVE = "exam_solve"
     EXAM_GRADE = "exam_grade"
     REPORT = "report"
+    REPORT_VERIFY = "report_verify"
 
 
 TASK_TIER: dict[Task, str] = {
@@ -76,6 +79,7 @@ TASK_TIER: dict[Task, str] = {
     Task.NOTE: "light",
     Task.EXAM_SOLVE: "light",
     Task.REPORT: "light",
+    Task.REPORT_VERIFY: "deep",
 }
 
 # API 명세의 usage.role
@@ -98,6 +102,7 @@ TASK_ROLE: dict[Task, str] = {
     Task.EXAM_VERIFY: "evaluator",
     Task.EXAM_GRADE: "evaluator",
     Task.REPORT: "report",
+    Task.REPORT_VERIFY: "report",
 }
 
 
@@ -124,14 +129,6 @@ def is_last_attempt() -> bool:
 
 
 _providers: dict[str, LLMProvider] = {}
-
-
-def set_provider(name: str, provider: LLMProvider) -> None:
-    _providers[name] = provider
-
-
-def reset_providers() -> None:
-    _providers.clear()
 
 
 def get_provider(name: str, settings: Settings | None = None) -> LLMProvider:
@@ -264,6 +261,8 @@ def call_structured(
                   input_tokens=0, output_tokens=0, error_code=exc.code)
         raise
     schema = strict_schema(output_model)
+    # 모든 호출 공통: 자료·대화·답안 안의 지시문(프롬프트 인젝션)을 따르지 않는다
+    system = system.rstrip() + "\n\n" + render("input_safety")
 
     feedback = ""
     last: Outcome | None = None
@@ -305,7 +304,11 @@ def call_structured(
         log_event("llm_invalid_output", logging.WARNING,
                   message=f"근거 검증 실패 {len(outcome.fatal)}건 (시도 {attempt}/{attempts})",
                   role=role, model=tier.model, **_raw(result.text))
-        log_event("llm_grounding_detail", logging.DEBUG, role=role, problems=outcome.fatal[:15])
+        # 왜 다시 시도했는지 운영 로그에서 바로 보이게 WARNING. 실패 이유에 선생님 문장 인용이 들어가므로
+        # raw_output과 같은 스위치(LOG_RAW_OUTPUT)를 따른다 — false면 찍지 않는다 (건수는 위 message에 있음)
+        if get_settings().log_raw_output:
+            log_event("llm_grounding_detail", logging.WARNING, role=role,
+                      problems=[msg[:300] for msg in outcome.fatal[:15]])
 
     if last is not None and accept_after_retries:
         # 근거가 확인되지 않은 항목은 validate가 이미 뺐다 → 남은 부분만 쓴다

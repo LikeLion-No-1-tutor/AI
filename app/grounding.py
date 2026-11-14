@@ -113,16 +113,28 @@ def answer_leaked(answer: str, question: str, ignore: str = "") -> bool:
 _PAREN = re.compile(r"[(\[（](.*?)[)\]）]")
 
 
+def pair_parts(name: str) -> list[str]:
+    """짝 개념 이름('전역 최솟값·지역 최솟값')의 양쪽 이름 (괄호 밖, '·'로 나눔). 짝이 아니면 [].
+
+    두 개념이 견주어야 뜻이 생기면 체크리스트에서 한 줄로 합친다(PRD 13장). 둘 중 하나만 말해도 그 용어를 말한 것으로 본다.
+    """
+    outside = _PAREN.sub(" ", name)
+    if "·" not in outside:
+        return []
+    return [part.strip() for part in outside.split("·") if len(normalize(part)) >= 2]
+
+
 def term_aliases(name: str) -> list[str]:
     """용어 이름의 여러 표기 (정규화). 예: '순환 신경망(RNN)' → ['순환신경망rnn', '순환신경망', 'rnn'].
 
-    괄호 안팎을 따로 인정한다. 본 이름(전체·괄호 밖)은 한 글자도 인정하고('큐', '힙'),
+    괄호 안팎을 따로 인정한다. 짝 개념('A·B')은 A와 B도 각각 인정한다. 본 이름(전체·괄호 밖)은 한 글자도 인정하고('큐', '힙'),
     괄호 안 보조 표기는 2글자 이상만 쓴다 (예: '스택(S)'의 'S'로는 판단하지 않음).
     """
     outside = _PAREN.sub(" ", name)
     inside = [part for group in _PAREN.findall(name) for part in re.split(r"[,/·]", group)]
     out: list[str] = []
-    for alias, min_len in [(name, 1), (outside, 1), *[(part, 2) for part in inside]]:
+    for alias, min_len in [(name, 1), (outside, 1), *[(part, 2) for part in pair_parts(name)],
+                           *[(part, 2) for part in inside]]:
         key = normalize(alias)
         if len(key) >= min_len and key not in out:
             out.append(key)

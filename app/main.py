@@ -1,6 +1,6 @@
 """티칭로그 AI 서버 (FastAPI). Django만 부른다. DB를 쓰지 않는다.
 
-실행: uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
+실행: uvicorn app.main:app --host 0.0.0.0 --port 8001 --no-access-log
 문서: /docs
 
 | ID   | Method | 주소                          | 예산(LLM) |
@@ -98,6 +98,9 @@ async def request_context(request: Request, call_next):
               "duration_ms": int((time.monotonic() - started) * 1000)}
     if request.state.error_code:
         fields["error_code"] = request.state.error_code
+    # Render 헬스 체크가 5초마다 /health를 불러 하루 1만 줄 넘게 쌓인다 → 정상 응답은 남기지 않는다 (실패는 남김)
+    if request.url.path == "/health" and status < 400:
+        return response
     log_event("http_request", level, message=getattr(request.state, "error_detail", "") or "", **fields)
     return response
 
@@ -150,7 +153,8 @@ def require_token(x_internal_token: str | None = Header(default=None)) -> None:
         if get_settings().app_env == "local":
             return  # 로컬 개발: 토큰 미설정이면 생략
         raise invalid_token()
-    if not x_internal_token or not hmac.compare_digest(x_internal_token, expected):
+    # 바이트로 비교: 문자열끼리 비교하면 한글이 섞인 토큰에서 TypeError가 나서 401 대신 502가 나간다
+    if not x_internal_token or not hmac.compare_digest(x_internal_token.encode(), expected.encode()):
         raise invalid_token()
 
 
@@ -168,7 +172,7 @@ def _background() -> context.UsageCollector:
 # ───────────────────────── AI-0 ─────────────────────────
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])  # UptimeRobot 같은 감시 서비스는 HEAD로 부른다
 def health() -> dict:
     return {"status": "ok"}
 
@@ -218,8 +222,8 @@ def materials_summary(title: str = Form(...), terms: str = Form(...), file: Uplo
 @app.post("/lessons/messages/analyze", response_model=AnalyzeResponse, dependencies=auth)
 def lessons_analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     usage = _realtime()
-    updates, hand = lesson.analyze(req)
-    return AnalyzeResponse(term_updates=updates, hand_raise=hand, usage=usage.items())
+    updates, hand, reaction = lesson.analyze(req)
+    return AnalyzeResponse(term_updates=updates, hand_raise=hand, reaction=reaction, usage=usage.items())
 
 
 @app.post("/lessons/questions", response_model=QuestionResponse, dependencies=auth)
@@ -232,8 +236,8 @@ def lessons_questions(req: QuestionRequest) -> QuestionResponse:
 @app.post("/lessons/note", response_model=NoteResponse, dependencies=auth)
 def lessons_note(req: NoteRequest) -> NoteResponse:
     usage = _background()
-    content = note.write_note(req)
-    return NoteResponse(content=content, usage=usage.items())
+    content, terms = note.write_note(req)
+    return NoteResponse(content=content, terms=terms, usage=usage.items())
 
 
 # ───────────────────────── AI-6, AI-7, AI-8 시험 ─────────────────────────

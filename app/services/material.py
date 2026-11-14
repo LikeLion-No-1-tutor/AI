@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from ..config import get_settings
 from ..context import gather, submit
 from ..errors import LLMError, LLMTimeout, unreadable, validation_error
-from ..grounding import covered_by, numbers_unsupported, mentions_term, normalize, quote_in_any, term_aliases
+from ..grounding import covered_by, numbers_unsupported, mentions_term, normalize, pair_parts, quote_in_any, term_aliases
 from ..llm.base import ImageInput
 from ..llm.router import Outcome, OutputRejected, Task, call_structured
 from ..logging_setup import log_event
@@ -43,7 +43,7 @@ from ..schemas.llm_outputs import (
     TermExtractionOutput,
     BatchSummaryOutput,
 )
-from .common import claim_verification_on, format_chunks, rules, verify_claims
+from .common import claim_verification_on, format_chunks, rules, run_check, verify_claims
 from .summary_doc import SummaryTerm, build_summary_markdown
 
 SUMMARY_TOP_K = 6
@@ -263,6 +263,11 @@ def extract_terms(ctx: MaterialContext) -> list[TermBrief]:
                              output_model=TermExtractionOutput, validate=validate)
     if not result.value:
         raise unreadable("자료에서 근거가 확인되는 용어를 찾지 못함")
+    if len(result.value) < min_ok:
+        # 검증을 통과한 용어만 내보낸다 (실패시키면 수업을 시작할 수 없음). 품질 저하는 운영 로그로 알린다
+        log_event("terms_below_min", logging.WARNING,
+                  message=f"검증을 통과한 용어 {len(result.value)}개 (최소 {min_ok}개 미달) → 통과한 용어만 반환",
+                  returned=len(result.value), min_required=min_ok, max_count=count)
     if result.warnings:
         log_event("terms_dropped", logging.DEBUG, dropped=len(result.warnings))
     return [TermBrief(name=t.name, definition=t.definition) for t in result.value]
@@ -279,27 +284,22 @@ def _verify_definitions(terms: list[ExtractedTerm], cmap: dict[str, Chunk],
     다른 개념·식·예시를 정의로 가져온 것은 아닌지를 본다 (예: '학습률' 정의로 업데이트 식).
     본문 검사(verify_claims)와 같은 규칙:
     - cache {(이름, 정의, 근거 청크): 탈락 이유 또는 None}: 다시 부를 때 이미 본 용어는 검사하지 않는다.
-    - 검사 호출 자체가 실패(LLM 오류·시간 초과)하면 새 용어는 통과시킨다 (이미 인용·자료 대조를 통과함).
-      통과시킨 용어는 캐시하지 않으므로 다시 부르면 그때 다시 검사한다.
+    - 검사 호출 자체가 실패(LLM 오류·시간 초과)하면 한 번 더 부르고, 그래도 실패하면 통과시키지 않고 요청을
+      실패시킨다 (run_check strict). 정의는 체크리스트·요약·시험의 기준이라 검사받지 않은 정의를 쓰지 않는다.
     """
     cache = {} if cache is None else cache
     keys = [(t.name, t.definition, tuple(t.chunk_ids)) for t in terms]
     todo = [i for i, k in enumerate(keys) if k not in cache]
     missing: dict[int, str] = {}
     if todo:
-        try:
-            failed = _check_definitions([terms[i] for i in todo], cmap)
-        except (LLMError, LLMTimeout, OutputRejected) as exc:
-            log_event("definition_verification_skipped", logging.DEBUG,
-                      message=f"정의 검사 호출 실패 → 새 용어 {len(todo)}개는 코드 검증만으로 통과",
-                      error_code=getattr(exc, "code", "LLM_ERROR"))
-            failed = {}
-        else:
-            for k, i in enumerate(todo):
-                if failed.get(k) == _NOT_CHECKED:
-                    missing[i] = _NOT_CHECKED
-                else:
-                    cache[keys[i]] = failed.get(k)
+        # 용어 정의는 체크리스트·요약·시험 전체의 기준이라, 검사 없이 통과시키지 않는다 (두 번 실패하면 요청 실패)
+        failed = run_check(lambda: _check_definitions([terms[i] for i in todo], cmap),
+                           event="definition_verification_failed", count=len(todo), strict=True)
+        for k, i in enumerate(todo):
+            if failed.get(k) == _NOT_CHECKED:
+                missing[i] = _NOT_CHECKED
+            else:
+                cache[keys[i]] = failed.get(k)
     out = {i: cache[k] for i, k in enumerate(keys) if cache.get(k)}
     out.update(missing)
     if out:
@@ -462,6 +462,10 @@ def _find_relations(ctx: MaterialContext, terms: list[TermBrief]) -> list[tuple[
         return []
     chunks = sorted(pool.values(), key=lambda c: (c.page, c.id))
     names = {normalize(t.name): t.name for t in terms}
+
+    def _named_in(key: str, body: str) -> bool:
+        # 짝 개념('전역 최솟값·지역 최솟값')은 한쪽 이름만 나와도 된다
+        return key in body or any(normalize(p) in body for p in pair_parts(names[key]))
     max_rel = len(terms) * 2
     verify_cache: dict[str, str | None] = {}
 
@@ -476,7 +480,7 @@ def _find_relations(ctx: MaterialContext, terms: list[TermBrief]) -> list[tuple[
                 continue
             pair = frozenset((a, b))
             body = normalize(r.text)
-            if pair in pairs or not r.text.strip() or a not in body or b not in body:
+            if pair in pairs or not r.text.strip() or not _named_in(a, body) or not _named_in(b, body):
                 continue   # 같은 쌍 반복, 또는 문장에 두 용어가 다 들어 있지 않은 것(관계가 아니라 한 용어 설명)은 뺀다
             ids = [x for x in r.chunk_ids if x in pool]
             if not ids or not quote_in_any(r.evidence_quote, [pool[x].text for x in ids]):

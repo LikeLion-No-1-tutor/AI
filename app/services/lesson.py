@@ -8,6 +8,7 @@ AI-3은 LLM을 두 번 '따로, 동시에' 부른다.
   - [일반, student] 학생 AI가 손을 들지 판단. 학생 프롬프트에는 judge 데이터(용어 정의)를 절대 넣지 않음.
       · 손 들기에 실패해도 용어 판정은 돌려준다 (hand_raise: null)
       · 설명이 끝난 때(손 들 때)에만 부른다. 설명 도중이면 LLM을 부르지 않고 hand_raise: null (hand_raise_point)
+      · 학생 반응: 방금 메시지가 학생 질문에 대한 답이고 다시 손 들지 않았으면 페르소나별 고정 문장 (LLM 없음)
 AI-4: [일반, student] 버튼을 누른 시점까지의 대화 + 손 든 이유로 질문 하나.
       · 질문에 수업 대화·페르소나 '원래 아는 것'에 없는 전문 용어가 있으면 이유를 붙여 다시 부른다.
         마지막 시도에서도 남으면 질문은 돌려주고 로그만 남긴다 (의성어 등 오탐으로 버튼이 실패하지 않게).
@@ -28,6 +29,7 @@ from ..prompts import render
 from ..schemas.api import AnalyzeRequest, HandRaise, JudgePart, QuestionRequest, StudentPart, TermUpdate
 from ..schemas.enums import TERM_RANK, MessageKind, Sender, TermStatus
 from ..schemas.llm_outputs import HandRaiseOutput, LLMTermJudgment, QuestionMakeOutput, TermJudgeOutput
+from ..personas import reaction_for
 from .common import index_messages, rules, student_system
 
 # ───────────────────────── 용어 판정 (judge) ─────────────────────────
@@ -206,12 +208,36 @@ def decide_hand_raise(student: StudentPart, point: str = "handoff") -> HandRaise
                            validate=validate, accept_after_retries=False).value
 
 
-def analyze(req: AnalyzeRequest) -> tuple[list[TermUpdate], HandRaise | None]:
+def _answer_reaction(student: StudentPart) -> str | None:
+    """방금 메시지가 학생 질문에 대한 '끝난' 답변이면, 페르소나의 고정 반응 문장 (LLM 호출 없음).
+
+    짧은 답("응 맞아!")도 반응한다 (손 들기 판단은 하지 않지만 답을 받은 건 맞으므로).
+    답변이 이어지는 중(":", "그리고" …로 끝남)이면 아직 반응하지 않는다.
+    """
+    msgs = student.messages
+    if not msgs:
+        return None
+    last = msgs[-1]
+    if last.sender != Sender.TEACHER or last.kind != MessageKind.ANSWER or not last.content.strip():
+        return None
+    if _continues(last.content.strip()):
+        return None
+    nth = sum(1 for m in msgs if m.sender == Sender.TEACHER and m.kind == MessageKind.ANSWER) - 1
+    return reaction_for(student.persona.code, nth)
+
+
+def analyze(req: AnalyzeRequest) -> tuple[list[TermUpdate], HandRaise | None, str | None]:
+    """돌려주는 값: (용어 상태 변화, 손 들기, 학생 반응).
+
+    학생 반응은 선생님이 질문에 답했고 학생이 다시 손 들지 않았을 때만 나온다 (팀 결정).
+    손 들기 판단이 실패했으면 이해했는지 모르므로 반응도 보내지 않는다.
+    """
+    reaction = _answer_reaction(req.student)
     point = hand_raise_point(req.student.messages, [t.name for t in req.judge.terms], req.student.persona.code)
     if point is None:
         # 설명 도중 → 손 들기 LLM을 부르지 않는다 (말 끊지 않기 + 토큰 절약)
         log_event("hand_raise_not_now", logging.DEBUG)
-        return judge_terms(req.judge), None
+        return judge_terms(req.judge), None, reaction
     with ThreadPoolExecutor(max_workers=2) as pool:
         judge_f = submit(pool, judge_terms, req.judge)
         hand_f = submit(pool, decide_hand_raise, req.student, point)
@@ -220,11 +246,13 @@ def analyze(req: AnalyzeRequest) -> tuple[list[TermUpdate], HandRaise | None]:
             hand = hand_f.result()
         except (LLMError, LLMTimeout, OutputRejected) as exc:
             log_event("hand_raise_skipped", logging.DEBUG, error_code=getattr(exc, "code", "LLM_ERROR"))
-            hand = None
+            hand, reaction = None, None
         except Exception as exc:  # noqa: BLE001 — 손 들기는 부가 기능: 코드 오류여도 판정 결과는 돌려준다
             log_exception(exc)    # 명세 로그 이벤트 'exception' (코드 오류라 prod에서도 남긴다)
-            hand = None
-    return updates, hand
+            hand, reaction = None, None
+    if hand is not None:
+        reaction = None   # 답을 듣고도 막혔으면 '이해했어요' 반응은 하지 않는다
+    return updates, hand, reaction
 
 
 # ───────────────────────── AI-4 질문 만들기 ─────────────────────────
@@ -232,6 +260,18 @@ def analyze(req: AnalyzeRequest) -> tuple[list[TermUpdate], HandRaise | None]:
 
 # 아래첨자 기호 표기 (h_t, x_{t-1}, W_hh …). 선생님이 쓴 표기만 쓸 수 있다 (h_t를 듣고 h_{t-1}을 만들면 안 됨)
 _NOTATION = re.compile(r"[A-Za-z][A-Za-z0-9]*_(?:\{[^{}\s]+\}|[A-Za-z0-9+\-]+)")
+# 글투 블록 제목("[질문]")을 질문 앞에 따라 붙이는 경우가 있다 (실측: 서연 30개 중 2개) → 맨 앞 꼬리표만 뗀다
+_LEADING_LABEL = re.compile(r"^\s*\[[^\[\]\n]{1,12}\]\s*")
+# 물음표 하나로 다시 쓰라고 하면 물음표를 아예 빼고 "~나요."로 끝내기도 한다 (실측: 서연 3개).
+# 묻는 끝맺음일 때만 마지막 마침표를 물음표로 바꾼다 ("궁금합니다.", "설명해 주세요."는 그대로)
+_ASKING_END = re.compile(r"(나요|까요|가요|니까|는지요)\s*\.?\s*$")
+
+
+def tidy_question(text: str) -> str:
+    text = _LEADING_LABEL.sub("", text.strip()).strip()
+    if "?" not in text and "？" not in text and _ASKING_END.search(text):
+        text = text.rstrip(". ") + "?"
+    return text
 
 
 def make_question(req: QuestionRequest) -> str:
@@ -241,7 +281,7 @@ def make_question(req: QuestionRequest) -> str:
     heard_norm = normalize(" ".join(heard))
 
     def validate(out: QuestionMakeOutput) -> Outcome[str]:
-        text = out.question.strip()
+        text = tidy_question(out.question)
         if not text:
             return Outcome("", fatal=["question이 비어 있습니다."])
         if any(same_text(text, a) for a in asked):
@@ -249,7 +289,8 @@ def make_question(req: QuestionRequest) -> str:
         if not is_last_attempt():
             # 한 번에 하나만 묻는다: 물음표가 둘 이상이면 선생님이 무엇에 답할지 흐려진다
             if text.count("?") + text.count("？") > 1:
-                return Outcome(text, fatal=["물음표가 두 개 이상입니다. 가장 궁금한 질문 하나만, 물음표 하나로 쓰세요."])
+                return Outcome(text, fatal=["물음표가 두 개 이상입니다. 가장 궁금한 질문 하나만 남기고, "
+                                            "물음표(?)는 정확히 하나를 질문 문장 끝에 쓰세요 (물음표를 빼지 마세요)."])
             notation = [n for n in _NOTATION.findall(text) if normalize(n) not in heard_norm]
             if notation:
                 return Outcome(text, fatal=[f"선생님이 쓰지 않은 기호 표기({', '.join(notation)})가 있습니다. "
@@ -265,7 +306,7 @@ def make_question(req: QuestionRequest) -> str:
             log_event("question_unheard_words", logging.DEBUG, count=len(unheard), latin=len(latin))
         return Outcome(text)
 
-    system = student_system(req.persona, render("question_make"))
+    system = student_system(req.persona, render("question_make"), voice="질문")
     user = (f"[지금까지 수업 대화]\n{indexed.format(req.persona.name)}\n\n"
             f"[손 든 이유]\n{req.reason.strip()}")
     return call_structured(Task.QUESTION_MAKE, system=system, user=user, output_model=QuestionMakeOutput,

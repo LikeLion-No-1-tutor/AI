@@ -120,13 +120,26 @@ class NoteLine(BaseModel):
     evidence_quote: str
 
 
-class NoteSection(BaseModel):
-    heading: str
+class NoteConcept(BaseModel):
+    term_id: int             # 용어 목록의 term_id (0 = 어느 용어에도 맞지 않음)
     lines: list[NoteLine]
 
 
+class NoteQuestionTerm(BaseModel):
+    number: int              # [질문 목록]의 번호
+    term_id: int
+
+
+class NoteWonder(BaseModel):
+    index: int               # [손 들었지만 묻지 못한 메모] 번호
+    term_id: int
+    text: str                # 메모를 페르소나 말투의 질문 한 문장으로
+
+
 class NoteOutput(BaseModel):
-    sections: list[NoteSection]
+    concepts: list[NoteConcept]           # 용어별 개념 (선생님 설명 메시지)
+    questions: list[NoteQuestionTerm]     # 학생 질문마다 어느 용어에 대한 것인지
+    wonders: list[NoteWonder]             # 확인하지 않은 질문 (손 들었지만 선생님이 받지 않은 것)
 
 
 class LLMSolveAnswer(BaseModel):
@@ -194,6 +207,9 @@ class LLMStrength(BaseModel):
 class LLMRecommendation(BaseModel):
     term_id: int
     text: str
+    # 자료(정의)와 어긋나게 설명한 부분 / 같은 설명 중 맞게 한 부분 — 선생님 메시지 원문 인용 (코드가 확인)
+    wrong_quote: str | None = None
+    right_quote: str | None = None
 
 
 class ReportOutput(BaseModel):

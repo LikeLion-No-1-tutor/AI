@@ -25,9 +25,11 @@ MIN_TEXT_CHARS = 50
 CODE_LINES_PER_PAGE = 120
 
 TEXT_EXT = {".txt", ".md", ".markdown"}
-IMAGE_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}   # 명세: PNG·JPG
+IMAGE_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+              ".webp": "image/webp"}   # PNG·JPG·WebP (프론트가 받는 이미지 형식)
 # 파일 앞 바이트로 실제 형식을 본다 (확장자만 믿으면 이름만 .png인 파일이 공급자에서 400 → 502가 된다)
 _IMAGE_MAGIC = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"))
+# WebP: 0~3바이트 'RIFF', 8~11바이트 'WEBP'
 # LLM에 보내는 이미지의 긴 변 상한(px). Claude는 이보다 큰 이미지를 어차피 줄여서 보므로 미리 줄여 보낸다.
 # 비정상적으로 큰 PDF 쪽을 렌더링할 때 메모리가 크게 늘어나는 것도 이 값으로 막는다.
 MAX_IMAGE_PX = 1568
@@ -72,7 +74,25 @@ def _sniff_image(data: bytes) -> str | None:
     for magic, mime in _IMAGE_MAGIC:
         if data.startswith(magic):
             return mime
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
     return None
+
+
+def _webp_to_png(file_name: str, data: bytes) -> bytes:
+    """WebP는 PyMuPDF가 열지 못해서 Pillow로 PNG로 바꾼다 (그다음 크기 줄이기는 PNG와 같다)."""
+    import io
+
+    from PIL import Image
+
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            img.seek(0)   # 움직이는 WebP는 첫 장면만
+            out = io.BytesIO()
+            img.convert("RGBA" if "A" in img.getbands() else "RGB").save(out, "PNG")
+            return out.getvalue()
+    except Exception as exc:
+        raise unreadable(f"{_ext(file_name)}: 이미지를 열 수 없음") from exc
 
 
 def detect_kind(file_name: str, data: bytes) -> SourceKind:
@@ -94,7 +114,9 @@ def prepare_image(file_name: str, data: bytes) -> tuple[bytes, str]:
     """LLM에 보낼 (이미지 바이트, MIME). 형식은 앞 바이트로 판별하고, 긴 변이 MAX_IMAGE_PX를 넘으면 줄인다."""
     mime = _sniff_image(data)
     if mime is None:
-        raise unreadable(f"{_ext(file_name)}: PNG·JPG 이미지가 아니거나 손상된 파일")
+        raise unreadable(f"{_ext(file_name)}: PNG·JPG·WebP 이미지가 아니거나 손상된 파일")
+    if mime == "image/webp":
+        data, mime = _webp_to_png(file_name, data), "image/png"
     try:
         with pymupdf.open(stream=data, filetype=mime.split("/")[1]) as doc:
             rect = doc[0].rect
